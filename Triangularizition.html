@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>三角化实验 — Ruppert Delaunay 细化</title>
+  <script src="../assets/wasm/ruppert.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      background: #060b14;
+      color: #c6d1f4;
+      font-family: "Segoe UI", "Helvetica Neue", system-ui, sans-serif;
+      overflow: hidden;
+    }
+    .app { display: flex; flex-direction: column; height: 100vh; }
+
+    .toolbar {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 14px;
+      padding: 12px 18px;
+      background: linear-gradient(180deg, #101a30, #0b1424);
+      border-bottom: 1px solid rgba(106,132,255,.18);
+    }
+    .group { display: flex; align-items: center; gap: 8px; }
+    .group > label { font-size: 12.5px; color: #8a9dd4; font-weight: 600; letter-spacing: .5px; }
+    .sep { padding-left: 14px; border-left: 1px solid rgba(106,132,255,.16); }
+    select {
+      background: #132040; color: #dbe6ff; border: 1px solid rgba(106,200,255,.35);
+      border-radius: 8px; padding: 6px 10px; font-size: 13px; font-family: inherit;
+      cursor: pointer; max-width: 230px;
+    }
+    select:hover { border-color: rgba(106,200,255,.7); }
+    button {
+      background: linear-gradient(135deg, #1e3358, #2a4578);
+      color: #e6eeff; border: 1px solid rgba(120,150,255,.35);
+      border-radius: 8px; padding: 7px 16px; font-size: 13px; font-weight: 600;
+      font-family: inherit; cursor: pointer; letter-spacing: .5px;
+      transition: background .2s, border-color .2s;
+    }
+    button:hover:not(:disabled) { background: linear-gradient(135deg, #2e4778, #3a5e9a); border-color: rgba(150,180,255,.6); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.primary {
+      background: linear-gradient(135deg, #c06020, #e07830);
+      border-color: rgba(255,160,60,.45); color: #fff;
+    }
+    button.primary:hover:not(:disabled) { background: linear-gradient(135deg, #d47030, #f08a40); }
+    .spacer { flex: 1; }
+    .hint { font-size: 12.5px; color: #8a9dd4; }
+
+    .main { flex: 1; position: relative; min-height: 0; }
+    canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+    canvas.dragging { cursor: grabbing; }
+
+    .stats {
+      position: absolute; top: 14px; left: 14px;
+      background: rgba(11,18,34,.86); border: 1px solid rgba(106,132,255,.2);
+      border-radius: 12px; padding: 12px 16px; font-size: 13px; line-height: 1.9;
+      backdrop-filter: blur(6px); min-width: 210px;
+    }
+    .stats .row { display: flex; justify-content: space-between; gap: 18px; }
+    .stats .row span { color: #ffd700; font-weight: 700; }
+    .stats .good { color: #7ef0a8; }
+    .stats .warn { color: #ffc65a; }
+    .stats .bad { color: #ff7b7b; }
+
+    .legend {
+      position: absolute; bottom: 16px; left: 14px;
+      background: rgba(11,18,34,.86); border: 1px solid rgba(106,132,255,.2);
+      border-radius: 12px; padding: 10px 14px; font-size: 12px;
+    }
+    .legend .bar {
+      height: 10px; width: 190px; border-radius: 5px; margin: 6px 0;
+      background: linear-gradient(90deg, #ff5a3c, #ffb020, #2bd66f);
+    }
+    .legend .lr { display: flex; justify-content: space-between; color: #9fb0d8; }
+
+    .title-tag {
+      position: absolute; top: 14px; right: 16px; text-align: right;
+      font-size: 12px; color: #6f80ad; line-height: 1.7;
+    }
+    .title-tag b { color: #9db4ff; }
+
+    .status-msg {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+      background: rgba(11,18,34,.92); border: 1px solid rgba(106,132,255,.3);
+      border-radius: 12px; padding: 14px 22px; font-size: 15px; color: #bcd0ff;
+      display: none; z-index: 30;
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+  <div class="toolbar">
+    <div class="group">
+      <label>模型</label>
+      <select id="source-select"></select>
+    </div>
+    <div class="group sep">
+      <label>最小角</label>
+      <select id="min-angle-select">
+        <option value="20">20°</option>
+        <option value="25" selected>25°</option>
+        <option value="30">30°</option>
+      </select>
+      <button id="tri-btn" class="primary">三角化</button>
+    </div>
+    <div class="group sep">
+      <button id="reset-btn">重置网格</button>
+      <button id="fit-btn">适应窗口</button>
+    </div>
+    <span class="spacer"></span>
+    <span class="hint" id="hint">选择模型开始</span>
+  </div>
+
+  <div class="main">
+    <canvas id="cv"></canvas>
+    <div class="stats" id="stats">
+      <div class="row">顶点数 <span id="s-v">-</span></div>
+      <div class="row">三角形数 <span id="s-f">-</span></div>
+      <div class="row">最小角 <span id="s-a">-</span></div>
+      <div class="row">劣质面 &lt; 20° <span id="s-bad">-</span></div>
+      <div class="row">耗时 <span id="s-t">-</span></div>
+    </div>
+    <div class="legend">
+      <div>三角形最小角</div>
+      <div class="bar"></div>
+      <div class="lr"><span>&lt; 15° 差</span><span>25° 好</span><span>&gt; 30°</span></div>
+    </div>
+    <div class="title-tag">
+      <b>三角化实验</b><br>
+      Ruppert Delaunay 细化 · C++/WASM<br>
+      劣质三角形按角度高亮
+    </div>
+    <div class="status-msg" id="status-msg"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+"use strict";
+
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const sourceSelect = document.getElementById("source-select");
+const minAngleSelect = document.getElementById("min-angle-select");
+const triBtn = document.getElementById("tri-btn");
+const resetBtn = document.getElementById("reset-btn");
+const fitBtn = document.getElementById("fit-btn");
+const hintEl = document.getElementById("hint");
+const statusEl = document.getElementById("status-msg");
+const sV = document.getElementById("s-v");
+const sF = document.getElementById("s-f");
+const sA = document.getElementById("s-a");
+const sBad = document.getElementById("s-bad");
+const sT = document.getElementById("s-t");
+
+let mesh = null;        // { V:[[x,y]], F:[[a,b,c]] }
+let initial = null;     // OBJ 的原始网格，用于「重置网格」
+let polygon = null;     // 多边形轮廓 { outer, holes }，三角化前只画轮廓
+let faceMinAngle = [];  // 每个三角形的最小角（弧度），三角化后算一次
+let lastElapsed = 0;
+
+let scale = 1, ox = 0, oy = 0;
+let dragging = false, dragX = 0, dragY = 0;
+let loadToken = 0;
+
+/* ==================== 基础几何 ==================== */
+
+function bboxOf(pts) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of pts) {
+    if (p[0] < x0) x0 = p[0];
+    if (p[0] > x1) x1 = p[0];
+    if (p[1] < y0) y0 = p[1];
+    if (p[1] > y1) y1 = p[1];
+  }
+  return [x0, y0, x1, y1];
+}
+
+function pointInPoly(x, y, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
+    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
+}
+
+function minAngle2D(a, b, c) {
+  const ab = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  const bc = Math.hypot(c[0] - b[0], c[1] - b[1]);
+  const ca = Math.hypot(a[0] - c[0], a[1] - c[1]);
+  const clamp = (v) => Math.max(-1, Math.min(1, v));
+  const A = Math.acos(clamp((ab * ab + ca * ca - bc * bc) / (2 * ab * ca + 1e-12)));
+  const B = Math.acos(clamp((ab * ab + bc * bc - ca * ca) / (2 * ab * bc + 1e-12)));
+  const C = Math.acos(clamp((bc * bc + ca * ca - ab * ab) / (2 * bc * ca + 1e-12)));
+  return Math.min(A, B, C);
+}
+
+function circumcenter2D(a, b, c) {
+  const ax = a[0], ay = a[1], bx = b[0], by = b[1], cx = c[0], cy = c[1];
+  const D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+  if (Math.abs(D) < 1e-12) return null;
+  const a2 = ax * ax + ay * ay, b2 = bx * bx + by * by, c2 = cx * cx + cy * cy;
+  return [
+    (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / D,
+    (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / D
+  ];
+}
+
+function circumradius2D(a, b, c) {
+  const ab = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  const bc = Math.hypot(c[0] - b[0], c[1] - b[1]);
+  const ca = Math.hypot(a[0] - c[0], a[1] - c[1]);
+  const s = (ab + bc + ca) / 2;
+  const area = Math.sqrt(Math.max(0, s * (s - ab) * (s - bc) * (s - ca)));
+  if (area < 1e-12) return Infinity;
+  return (ab * bc * ca) / (4 * area);
+}
+
+function shortestEdge2D(a, b, c) {
+  return Math.min(
+    Math.hypot(b[0] - a[0], b[1] - a[1]),
+    Math.hypot(c[0] - b[0], c[1] - b[1]),
+    Math.hypot(a[0] - c[0], a[1] - c[1])
+  );
+}
+
+const edgeKey = (a, b) => (a < b ? a + "_" + b : b + "_" + a);
+
+function orient2D(ax, ay, bx, by, cx, cy) {
+  return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+}
+
+function incircle2D(ax, ay, bx, by, cx, cy, dx, dy) {
+  const adx = ax - dx, ady = ay - dy, bdx = bx - dx, bdy = by - dy, cdx = cx - dx, cdy = cy - dy;
+  const al = adx * adx + ady * ady, bl = bdx * bdx + bdy * bdy, cl = cdx * cdx + cdy * cdy;
+  return al * (bdx * cdy - bdy * cdx) - bl * (adx * cdy - ady * cdx) + cl * (adx * bdy - ady * bdx);
+}
+
+function extractBoundaryEdges(faces) {
+  const ec = new Map();
+  for (const [a, b, c] of faces) {
+    for (const [u, v] of [[a, b], [b, c], [c, a]]) {
+      const k = edgeKey(u, v);
+      ec.set(k, (ec.get(k) || 0) + 1);
+    }
+  }
+  const bd = new Set();
+  for (const [k, cnt] of ec) if (cnt === 1) bd.add(k);
+  return bd;
+}
+
+function encroachesEdge(p, u, v, P) {
+  const pu = P[u], pv = P[v];
+  const mx = (pu[0] + pv[0]) / 2, my = (pu[1] + pv[1]) / 2;
+  const dx = p[0] - mx, dy = p[1] - my;
+  const hl = Math.hypot(pv[0] - pu[0], pv[1] - pu[1]) / 2;
+  return dx * dx + dy * dy < hl * hl * 1.001;
+}
+
+function buildEdgeFaceMap(tris) {
+  const map = new Map();
+  for (let fi = 0; fi < tris.length; fi++) {
+    const [a, b, c] = tris[fi];
+    for (const [u, v] of [[a, b], [b, c], [c, a]]) {
+      const k = edgeKey(u, v);
+      if (!map.has(k)) map.set(k, []);
+      map.get(k).push(fi);
+    }
+  }
+  return map;
+}
+
+function findFaceWithEdge(tri, u, v) {
+  for (let fi = 0; fi < tri.length; fi++) {
+    const [a, b, c] = tri[fi];
+    if ((a === u || b === u || c === u) && (a === v || b === v || c === v)) return fi;
+  }
+  return -1;
+}
+
+/* ==================== Ruppert（纯 JS 回退） ==================== */
+
+function ruppertRefine(positions, faces, minAngleDeg, maxIter) {
+  const target = minAngleDeg * Math.PI / 180;
+  const B = 1.0 / Math.sin(target * 0.5);
+  const pos = positions.map((p) => [p[0], p[1]]);
+  const tri = faces.map((f) => [f[0], f[1], f[2]]);
+  const boundary = extractBoundaryEdges(tri);
+
+  for (let fi = 0; fi < tri.length; fi++) {
+    const [a, b, c] = tri[fi];
+    if (orient2D(pos[a][0], pos[a][1], pos[b][0], pos[b][1], pos[c][0], pos[c][1]) < 0) {
+      tri[fi] = [a, c, b];
+    }
+  }
+
+  for (let iter = 0; iter < maxIter; iter++) {
+    let worst = -1, worstAng = Infinity;
+    for (let fi = 0; fi < tri.length; fi++) {
+      const [a, b, c] = tri[fi];
+      const ang = minAngle2D(pos[a], pos[b], pos[c]);
+      if (ang < worstAng) { worstAng = ang; worst = fi; }
+    }
+    if (worst < 0 || worstAng >= target) break;
+
+    const [a, b, c] = tri[worst];
+    const R = circumradius2D(pos[a], pos[b], pos[c]);
+    const l = shortestEdge2D(pos[a], pos[b], pos[c]);
+    if (R / l < B && worstAng >= target * 0.6) break;
+
+    const cc = circumcenter2D(pos[a], pos[b], pos[c]);
+    if (!cc) continue;
+
+    let encroached = false;
+    for (const ek of boundary) {
+      const [u, v] = ek.split("_").map(Number);
+      if (!encroachesEdge(cc, u, v, pos)) continue;
+      encroached = true;
+      const pu = pos[u], pv = pos[v];
+      const mid = [(pu[0] + pv[0]) / 2, (pu[1] + pv[1]) / 2];
+      const newIdx = pos.length;
+      pos.push(mid);
+      boundary.delete(ek);
+      boundary.add(edgeKey(u, newIdx));
+      boundary.add(edgeKey(v, newIdx));
+      const fIdx = findFaceWithEdge(tri, u, v);
+      if (fIdx >= 0) {
+        const [v0, v1, v2] = tri[fIdx];
+        const other = [v0, v1, v2].find((x) => x !== u && x !== v);
+        tri[fIdx] = [u, other, newIdx];
+        tri.push([v, newIdx, other]);
+      }
+      break;
+    }
+    if (encroached) continue;
+
+    const newIdx = pos.length;
+    pos.push(cc);
+    tri[worst] = [a, b, newIdx];
+    tri.push([b, c, newIdx]);
+    tri.push([c, a, newIdx]);
+
+    let flipped = true;
+    while (flipped) {
+      flipped = false;
+      const efm = buildEdgeFaceMap(tri);
+      for (const [k, arr] of efm) {
+        if (arr.length !== 2) continue;
+        const [u, v] = k.split("_").map(Number);
+        const f0 = tri[arr[0]], f1 = tri[arr[1]];
+        const others = [];
+        for (const x of f0) if (x !== u && x !== v) others.push(x);
+        for (const x of f1) if (x !== u && x !== v) others.push(x);
+        if (others.length !== 2) continue;
+        const [p, q] = others;
+        const ic = incircle2D(pos[u][0], pos[u][1], pos[v][0], pos[v][1], pos[p][0], pos[p][1], pos[q][0], pos[q][1]);
+        if (ic > 1e-10) {
+          tri[arr[0]] = [u, p, q];
+          tri[arr[1]] = [v, q, p];
+          flipped = true;
+        }
+      }
+    }
+  }
+  return { positions: pos, faces: tri };
+}
+
+/* ==================== Ruppert（WASM） ==================== */
+
+let ruppertInst = null, ruppertPromise = null;
+
+function initRuppert() {
+  if (ruppertInst) return Promise.resolve(ruppertInst);
+  if (typeof RuppertModule === "undefined") return Promise.resolve(null);
+  if (!ruppertPromise) {
+    ruppertPromise = RuppertModule({ locateFile: (p) => "../assets/wasm/" + p })
+      .then((m) => { ruppertInst = m; return m; })
+      .catch((e) => { console.error("Ruppert WASM 加载失败", e); return null; });
+  }
+  return ruppertPromise;
+}
+
+function extractBoundaryPSLG(V, F) {
+  const cnt = new Map();
+  for (const f of F) {
+    for (const [a, b] of [[f[0], f[1]], [f[1], f[2]], [f[2], f[0]]]) {
+      const k = edgeKey(a, b);
+      cnt.set(k, (cnt.get(k) || 0) + 1);
+    }
+  }
+  const segs = [];
+  const bset = new Set();
+  for (const f of F) {
+    for (const [a, b] of [[f[0], f[1]], [f[1], f[2]], [f[2], f[0]]]) {
+      if (cnt.get(edgeKey(a, b)) === 1) {
+        segs.push([a, b]);
+        bset.add(a);
+        bset.add(b);
+      }
+    }
+  }
+  const remap = new Map(), ptsFlat = [];
+  for (const vi of bset) {
+    remap.set(vi, ptsFlat.length / 2);
+    ptsFlat.push(V[vi][0], V[vi][1]);
+  }
+  const segIdx = [];
+  for (const [a, b] of segs) segIdx.push(remap.get(a), remap.get(b));
+  return { ptsFlat, segIdx, count: ptsFlat.length / 2 };
+}
+
+function callRuppert(inst, ptsArr, segArr, minAngle) {
+  const ptsPtr = inst._malloc(ptsArr.length * 8);
+  inst.HEAPF64.set(ptsArr, ptsPtr / 8);
+  const segPtr = inst._malloc(segArr.length * 4);
+  inst.HEAP32.set(segArr, segPtr / 4);
+  let result = null;
+  try {
+    const ret = inst.ccall("ruppert_run", "number",
+      ["number", "number", "number", "number", "number", "number", "number"],
+      [ptsPtr, ptsArr.length, segPtr, segArr.length, minAngle, 0, 0]);
+    if (ret === 0) {
+      const pSize = inst.ccall("get_points_size", "number", [], []);
+      const pPtr = inst.ccall("get_points", "number", [], []);
+      const tSize = inst.ccall("get_triangles_size", "number", [], []);
+      const tPtr = inst.ccall("get_triangles", "number", [], []);
+      const positions = [];
+      for (let i = 0; i < pSize; i += 2) {
+        positions.push([inst.HEAPF64[pPtr / 8 + i], inst.HEAPF64[pPtr / 8 + i + 1]]);
+      }
+      const faces = [];
+      for (let i = 0; i < tSize; i += 3) {
+        faces.push([inst.HEAP32[tPtr / 4 + i], inst.HEAP32[tPtr / 4 + i + 1], inst.HEAP32[tPtr / 4 + i + 2]]);
+      }
+      result = { positions, faces };
+    }
+  } finally {
+    inst._free(ptsPtr);
+    inst._free(segPtr);
+    inst.ccall("dispose", "void", [], []);
+  }
+  return result;
+}
+
+async function ruppertWasm(V, F, minAngle) {
+  const inst = await initRuppert();
+  if (!inst) return null;
+  const { ptsFlat, segIdx, count } = extractBoundaryPSLG(V, F);
+  if (count < 3 || segIdx.length < 6) return null;
+  return callRuppert(inst, new Float64Array(ptsFlat), new Int32Array(segIdx), minAngle);
+}
+
+// 多边形直接就是 PSLG（外环 + 洞），不需要先离散成网格。
+async function ruppertWasmPolygon(poly, minAngle) {
+  const inst = await initRuppert();
+  if (!inst) return null;
+  const ptsFlat = [], segIdx = [];
+  const addRing = (ring) => {
+    if (!ring || ring.length < 3) return;
+    const start = ptsFlat.length / 2;
+    for (const p of ring) ptsFlat.push(p[0], p[1]);
+    for (let i = 0; i < ring.length; i++) {
+      segIdx.push(start + i, start + ((i + 1) % ring.length));
+    }
+  };
+  addRing(poly.outer);
+  for (const h of poly.holes || []) addRing(h);
+  if (ptsFlat.length < 6 || segIdx.length < 6) return null;
+  return callRuppert(inst, new Float64Array(ptsFlat), new Int32Array(segIdx), minAngle);
+}
+
+/* ==================== 多边形 → 初始网格 ==================== */
+
+function makePolyMesh(outer, holes, maxAcross) {
+  const [minX, minY, maxX, maxY] = bboxOf(outer);
+  const w = maxX - minX, h = maxY - minY;
+  const cell = Math.max(w, h) / maxAcross;
+  const nx = Math.max(2, Math.round(w / cell) + 1);
+  const ny = Math.max(2, Math.round(h / cell) + 1);
+  const X = (i) => minX + (i / (nx - 1)) * w;
+  const Y = (j) => minY + (j / (ny - 1)) * h;
+  const ix = (i, j) => j * nx + i;
+
+  const region = (x, y) => {
+    if (!pointInPoly(x, y, outer)) return false;
+    for (const hl of holes) if (pointInPoly(x, y, hl)) return false;
+    return true;
+  };
+
+  const Vall = [];
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) Vall.push([X(i), Y(j)]);
+
+  const Fall = [];
+  for (let j = 0; j < ny - 1; j++) {
+    for (let i = 0; i < nx - 1; i++) {
+      const a = ix(i, j), b = ix(i + 1, j), c = ix(i, j + 1), d = ix(i + 1, j + 1);
+      for (const tri of [[a, b, d], [a, d, c]]) {
+        const cx = (Vall[tri[0]][0] + Vall[tri[1]][0] + Vall[tri[2]][0]) / 3;
+        const cy = (Vall[tri[0]][1] + Vall[tri[1]][1] + Vall[tri[2]][1]) / 3;
+        if (region(cx, cy)) Fall.push(tri);
+      }
+    }
+  }
+
+  const used = new Set();
+  Fall.forEach((f) => f.forEach((v) => used.add(v)));
+  const remap = new Array(Vall.length).fill(-1);
+  const V = [];
+  let k = 0;
+  for (let v = 0; v < Vall.length; v++) {
+    if (used.has(v)) { remap[v] = k++; V.push(Vall[v]); }
+  }
+  const F = Fall.map((f) => f.map((v) => remap[v]));
+  return { V, F };
+}
+
+/* ==================== OBJ 解析（只取 2D） ==================== */
+
+function parseObj(text) {
+  const V = [], F = [];
+  const lines = text.split(/\r?\n/);
+  // 先收顶点，避免面引用出现在顶点之前时索引失配
+  for (const line of lines) {
+    if (line[0] !== "v" || line[1] !== " ") continue;
+    const p = line.trim().split(/\s+/);
+    V.push([parseFloat(p[1]), parseFloat(p[2])]);
+  }
+  for (const line of lines) {
+    if (line[0] !== "f" || line[1] !== " ") continue;
+    const parts = line.trim().split(/\s+/).slice(1);
+    const idx = [];
+    for (const s of parts) {
+      let n = parseInt(s.split("/")[0], 10);
+      if (!Number.isFinite(n)) continue;
+      n = n < 0 ? V.length + n : n - 1;
+      idx.push(n);
+    }
+    for (let i = 1; i + 1 < idx.length; i++) F.push([idx[0], idx[i], idx[i + 1]]);
+  }
+  return { V, F };
+}
+
+/* ==================== 视图 ==================== */
+
+function toScreen(p) {
+  return [p[0] * scale + ox, -p[1] * scale + oy];
+}
+
+function fromScreen(sx, sy) {
+  return [(sx - ox) / scale, (oy - sy) / scale];
+}
+
+function fitView(pts) {
+  const points = pts || (mesh && mesh.V);
+  if (!points || !points.length) return;
+  const b = bboxOf(points);
+  const w = Math.max(1e-6, b[2] - b[0]);
+  const h = Math.max(1e-6, b[3] - b[1]);
+  const pad = 56;
+  const cw = cv.clientWidth, ch = cv.clientHeight;
+  scale = Math.min((cw - pad * 2) / w, (ch - pad * 2) / h);
+  const cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
+  ox = cw / 2 - cx * scale;
+  oy = ch / 2 + cy * scale;
+  draw();
+}
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = Math.max(1, Math.round(w * dpr));
+  cv.height = Math.max(1, Math.round(h * dpr));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  draw();
+}
+
+/* ==================== 绘制 ==================== */
+
+function computeFaceAngles() {
+  faceMinAngle = [];
+  if (!mesh) return;
+  for (const [a, b, c] of mesh.F) {
+    faceMinAngle.push(minAngle2D(mesh.V[a], mesh.V[b], mesh.V[c]));
+  }
+}
+
+function updateStats(elapsedMs) {
+  if (!mesh) {
+    sV.textContent = "-"; sF.textContent = "-"; sA.textContent = "-";
+    sBad.textContent = "-"; sT.textContent = "-";
+    return;
+  }
+  let minA = Infinity, bad = 0;
+  for (const a of faceMinAngle) {
+    if (a < minA) minA = a;
+    if (a < 20 * Math.PI / 180) bad++;
+  }
+  const deg = minA === Infinity ? 0 : minA * 180 / Math.PI;
+  sV.textContent = mesh.V.length;
+  sF.textContent = mesh.F.length;
+  sA.textContent = deg ? deg.toFixed(1) + "°" : "-";
+  sBad.textContent = bad;
+
+  sA.className = deg >= 20 ? "good" : deg >= 12 ? "warn" : "bad";
+  sBad.className = bad === 0 ? "good" : bad < mesh.F.length * 0.1 ? "warn" : "bad";
+  sT.textContent = elapsedMs == null ? "-" : Math.round(elapsedMs) + " ms";
+}
+
+function drawPolygonOutline() {
+  if (!polygon) return;
+  const rings = [polygon.outer].concat(polygon.holes || []);
+  ctx.beginPath();
+  for (const ring of rings) {
+    for (let i = 0; i < ring.length; i++) {
+      const p = toScreen(ring[i]);
+      if (i) ctx.lineTo(p[0], p[1]); else ctx.moveTo(p[0], p[1]);
+    }
+    ctx.closePath();
+  }
+  ctx.strokeStyle = "rgba(140,200,255,.92)";
+  ctx.lineWidth = 1.6;
+  ctx.stroke();
+
+  ctx.fillStyle = "rgba(185,220,255,.85)";
+  for (const ring of rings) {
+    for (const v of ring) {
+      const p = toScreen(v);
+      ctx.beginPath();
+      ctx.arc(p[0], p[1], 1.7, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+function draw() {
+  const w = cv.clientWidth, h = cv.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#08101d";
+  ctx.fillRect(0, 0, w, h);
+
+  if (!mesh || !mesh.F.length) {
+    drawPolygonOutline();
+    return;
+  }
+
+  const V = mesh.V, F = mesh.F;
+
+  // 劣质三角形填充高亮，优质只留边，避免整片糊掉
+  for (let i = 0; i < F.length; i++) {
+    const deg = (faceMinAngle[i] || 0) * 180 / Math.PI;
+    if (deg >= 25) continue;
+    const [a, b, c] = F[i];
+    const pa = toScreen(V[a]), pb = toScreen(V[b]), pc = toScreen(V[c]);
+    ctx.beginPath();
+    ctx.moveTo(pa[0], pa[1]);
+    ctx.lineTo(pb[0], pb[1]);
+    ctx.lineTo(pc[0], pc[1]);
+    ctx.closePath();
+    ctx.fillStyle = deg < 15 ? "rgba(255,90,60,.42)" : "rgba(255,176,32,.30)";
+    ctx.fill();
+  }
+
+  // 边
+  ctx.beginPath();
+  for (let i = 0; i < F.length; i++) {
+    const [a, b, c] = F[i];
+    const pa = toScreen(V[a]), pb = toScreen(V[b]), pc = toScreen(V[c]);
+    ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]); ctx.lineTo(pc[0], pc[1]);
+    ctx.closePath();
+  }
+  ctx.strokeStyle = "rgba(150,185,255,.78)";
+  ctx.lineWidth = 0.85;
+  ctx.stroke();
+}
+
+/* ==================== 三角化 ==================== */
+
+function setHint(text) { hintEl.textContent = text; }
+function setStatus(text) {
+  statusEl.textContent = text || "";
+  statusEl.style.display = text ? "block" : "none";
+}
+
+function applyMesh(V, F) {
+  mesh = { V, F };
+  computeFaceAngles();
+}
+
+async function triangulate() {
+  const fromPolygon = !mesh && !!polygon;
+  if (!mesh && !polygon) { setHint("请先选择模型"); return; }
+  const minAngle = parseInt(minAngleSelect.value, 10);
+  triBtn.disabled = true;
+  setStatus("Ruppert 三角化中…");
+  const t0 = performance.now();
+
+  // 让状态提示先渲染出来
+  await new Promise((r) => setTimeout(r, 16));
+
+  let refined = null, viaWasm = false;
+  try {
+    refined = fromPolygon
+      ? await ruppertWasmPolygon(polygon, minAngle)
+      : await ruppertWasm(mesh.V, mesh.F, minAngle);
+    viaWasm = !!(refined && refined.faces.length);
+  } catch (e) {
+    console.error("WASM Ruppert 失败，回退 JS", e);
+  }
+  if (!viaWasm) {
+    try {
+      const base = fromPolygon
+        ? makePolyMesh(polygon.outer, polygon.holes || [], 28)
+        : mesh;
+      refined = ruppertRefine(base.V, base.F, minAngle, 200);
+    } catch (e) {
+      console.error(e);
+      setStatus("");
+      triBtn.disabled = false;
+      setHint("三角化失败: " + (e.message || e));
+      return;
+    }
+  }
+
+  if (!refined || !refined.faces.length) {
+    setStatus("");
+    triBtn.disabled = false;
+    setHint("三角化失败");
+    return;
+  }
+
+  lastElapsed = performance.now() - t0;
+  applyMesh(
+    refined.positions.map((p) => [p[0], p[1]]),
+    refined.faces
+  );
+  updateStats(lastElapsed);
+  draw();
+  setStatus("");
+  triBtn.disabled = false;
+  const span = "生成 " + mesh.V.length + " 顶点 / " + mesh.F.length + " 面";
+  setHint(
+    (viaWasm ? "Ruppert (C++/WASM)" : "Ruppert (JS 回退)") +
+    " · " + minAngle + "° · " + span
+  );
+}
+
+/* ==================== 载入 ==================== */
+
+const POLY_MODELS = [
+  ["annulus", "圆环 Annulus (含洞)"], ["horse", "马 Horse"], ["giraffe", "长颈鹿 Giraffe"],
+  ["deer", "鹿 Deer"], ["elephant", "大象 Elephant"], ["frog", "青蛙 Frog"],
+  ["rex", "霸王龙 Rex (含洞)"], ["raptor", "迅猛龙 Raptor"], ["dragon", "龙 Dragon"],
+  ["monkey", "猴 Monkey"], ["racoon", "浣熊 Racoon"], ["Archery", "弓箭手 Archery (含洞)"]
+];
+
+function buildSourceList() {
+  const g1 = document.createElement("optgroup");
+  g1.label = "多边形图形 (无网格 → 三角化)";
+  for (const [v, t] of POLY_MODELS) {
+    const o = document.createElement("option");
+    o.value = "poly:" + v;
+    o.textContent = t;
+    g1.appendChild(o);
+  }
+  sourceSelect.appendChild(g1);
+
+  const g2 = document.createElement("optgroup");
+  g2.label = "三角网格 — 2D 模型";
+  for (const [f, t] of [["alligator.obj", "短吻鳄"], ["woody.obj", "Woody"]]) {
+    const o = document.createElement("option");
+    o.value = "mesh:2dmodels/" + f;
+    o.textContent = t;
+    g2.appendChild(o);
+  }
+  sourceSelect.appendChild(g2);
+
+  const g3 = document.createElement("optgroup");
+  g3.label = "三角网格 — 字母";
+  for (let i = 65; i <= 90; i++) {
+    const L = String.fromCharCode(i);
+    const o = document.createElement("option");
+    o.value = "mesh:charaters/" + L + "_2d.obj";
+    o.textContent = "字母 " + L;
+    g3.appendChild(o);
+  }
+  sourceSelect.appendChild(g3);
+}
+
+async function loadPolygon(name) {
+  const token = ++loadToken;
+  setStatus("正在加载 " + name + " …");
+  try {
+    const resp = await fetch("../Models/bdhm_models/" + name + "/data.json");
+    const data = await resp.json();
+    if (token !== loadToken) return;
+
+    const cages = data.allcages || data.v || [];
+    if (!cages.length) { setStatus(""); setHint("该模型没有边界数据"); return; }
+    const outer = cages[0];
+    const nHoles = (data.holes && data.holes.length) || (cages.length - 1);
+    const holes = cages.slice(1, 1 + nHoles);
+
+    polygon = { outer: outer, holes: holes };
+    mesh = null;
+    initial = null;
+    faceMinAngle = [];
+
+    const flat = [];
+    for (const ring of [outer].concat(holes)) for (const p of ring) flat.push(p);
+    updateStats(null);
+    fitView(flat);
+    setStatus("");
+    setHint("已载入 " + name + " — 点「三角化」从轮廓生成 Delaunay 网格");
+  } catch (e) {
+    console.error(e);
+    if (token === loadToken) { setStatus(""); setHint("加载失败: " + (e.message || e)); }
+  }
+}
+
+async function loadObjMesh(url, label) {
+  const token = ++loadToken;
+  setStatus("正在加载 " + label + " …");
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const text = await resp.text();
+    if (token !== loadToken) return;
+
+    const m = parseObj(text);
+    if (!m.V.length || !m.F.length) throw new Error("模型无数据");
+
+    polygon = null;
+    initial = { V: m.V.map((p) => [p[0], p[1]]), F: m.F.map((f) => [f[0], f[1], f[2]]) };
+    applyMesh(initial.V.map((p) => [p[0], p[1]]), initial.F.map((f) => [f[0], f[1], f[2]]));
+    updateStats(null);
+    fitView();
+    setStatus("");
+    setHint("已载入 " + label + " — 点「三角化」按最小角重建网格");
+  } catch (e) {
+    console.error(e);
+    if (token === loadToken) { setStatus(""); setHint("加载失败: " + (e.message || e)); }
+  }
+}
+
+function loadSource(value) {
+  if (value.indexOf("poly:") === 0) {
+    loadPolygon(value.slice(5));
+  } else if (value.indexOf("mesh:") === 0) {
+    const rel = value.slice(5);
+    const label = sourceSelect.options[sourceSelect.selectedIndex].textContent;
+    loadObjMesh("../Models/" + rel, label);
+  }
+}
+
+/* ==================== 交互 ==================== */
+
+cv.addEventListener("mousedown", (e) => {
+  dragging = true;
+  dragX = e.clientX;
+  dragY = e.clientY;
+  cv.classList.add("dragging");
+});
+
+window.addEventListener("mousemove", (e) => {
+  if (!dragging) return;
+  ox += e.clientX - dragX;
+  oy += e.clientY - dragY;
+  dragX = e.clientX;
+  dragY = e.clientY;
+  draw();
+});
+
+window.addEventListener("mouseup", () => {
+  dragging = false;
+  cv.classList.remove("dragging");
+});
+
+cv.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const rect = cv.getBoundingClientRect();
+  const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+  const [wx, wy] = fromScreen(sx, sy);
+  scale *= Math.exp(-e.deltaY * 0.0015);
+  ox = sx - wx * scale;
+  oy = sy + wy * scale;
+  draw();
+}, { passive: false });
+
+triBtn.addEventListener("click", triangulate);
+
+resetBtn.addEventListener("click", () => {
+  if (polygon) {
+    mesh = null;
+    faceMinAngle = [];
+    updateStats(null);
+    fitView([].concat.apply([], [polygon.outer].concat(polygon.holes || [])));
+    setHint("已重置为轮廓");
+    return;
+  }
+  if (!initial) return;
+  applyMesh(initial.V.map((p) => [p[0], p[1]]), initial.F.map((f) => [f[0], f[1], f[2]]));
+  updateStats(null);
+  fitView();
+  setHint("已重置为初始网格");
+});
+
+fitBtn.addEventListener("click", fitView);
+sourceSelect.addEventListener("change", () => loadSource(sourceSelect.value));
+window.addEventListener("resize", resize);
+
+/* ==================== 启动 ==================== */
+
+buildSourceList();
+resize();
+sourceSelect.value = "mesh:2dmodels/alligator.obj";
+loadSource(sourceSelect.value);
+
+})();
+</script>
+</body>
+</html>
